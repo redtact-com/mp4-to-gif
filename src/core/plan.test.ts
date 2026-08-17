@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { DEFAULT_BYTES_PER_PX, MIN_DELAY_MS, buildPlan, calibrate, estimateBytes, formatBytes, widthForBudget } from './plan'
+import { DEFAULT_BYTES_PER_PX, MIN_DELAY_MS, buildPlan, calibrate, estimateBytes, formatBytes, normalizeCrop, widthForBudget } from './plan'
 import type { PlanInput } from './plan'
 
 const base: PlanInput = {
@@ -175,5 +175,83 @@ describe('calibrate — 実測から見積もり係数を合わせる', () => {
     const b = buildPlan({ ...base, bytesPerPx: 0.02 })
     expect(b.estimatedBytes).toBeLessThan(a.estimatedBytes)
     expect(b.estimatedBytes).toBe(Math.round(320 * 180 * 20 * 0.02))
+  })
+})
+
+describe('normalizeCrop — 切り抜き範囲', () => {
+  it('省略なら全体', () => {
+    expect(normalizeCrop(undefined, 640, 360)).toEqual({ x: 0, y: 0, width: 640, height: 360 })
+  })
+
+  it('指定をそのまま使う (整数に丸める)', () => {
+    expect(normalizeCrop({ x: 10.4, y: 20.6, width: 100.5, height: 50.2 }, 640, 360))
+      .toEqual({ x: 10, y: 21, width: 101, height: 50 })
+  })
+
+  it('はみ出したら内側に収め、理由を出す', () => {
+    const warnings: string[] = []
+    expect(normalizeCrop({ x: 600, y: 300, width: 200, height: 200 }, 640, 360, warnings))
+      .toEqual({ x: 600, y: 300, width: 40, height: 60 })
+    expect(warnings).toEqual(['切り抜き範囲が動画の外にはみ出していたので内側に収めました'])
+  })
+
+  it('負の座標は 0 に寄せる', () => {
+    expect(normalizeCrop({ x: -50, y: -10, width: 100, height: 100 }, 640, 360))
+      .toMatchObject({ x: 0, y: 0 })
+  })
+
+  it('空の矩形なら全体に戻して理由を出す', () => {
+    const warnings: string[] = []
+    expect(normalizeCrop({ x: 0, y: 0, width: 0, height: 100 }, 640, 360, warnings))
+      .toEqual({ x: 0, y: 0, width: 640, height: 360 })
+    expect(warnings).toEqual(['切り抜き範囲が空なので全体を使います'])
+  })
+
+  it('NaN が混ざっても例外を投げず全体に戻す', () => {
+    const warnings: string[] = []
+    expect(normalizeCrop({ x: NaN, y: 0, width: 100, height: 100 }, 640, 360, warnings))
+      .toEqual({ x: 0, y: 0, width: 640, height: 360 })
+    expect(warnings).toEqual(['切り抜き範囲の値が読めないので全体を使います'])
+  })
+
+  it('動画サイズが未取得なら 0 の矩形 (変換は始まらない)', () => {
+    expect(normalizeCrop({ x: 0, y: 0, width: 10, height: 10 }, 0, 0)).toEqual({ x: 0, y: 0, width: 0, height: 0 })
+  })
+})
+
+describe('buildPlan — 切り抜きと出力サイズ', () => {
+  const base = {
+    duration: 10, videoWidth: 640, videoHeight: 360, start: 0, end: 10,
+    mode: 'count' as const, fps: 10, count: 10, width: 0, keepAspect: true, height: 0,
+  }
+
+  it('幅 0 なら切り抜き後の寸法がそのまま出力サイズになる', () => {
+    const p = buildPlan({ ...base, crop: { x: 0, y: 0, width: 200, height: 100 } })
+    expect([p.outWidth, p.outHeight]).toEqual([200, 100])
+  })
+
+  it('**アスペクト比の基準は動画全体ではなく切り抜き後**', () => {
+    // 16:9 の動画から 1:1 を切り抜き、幅 120 を指定 → 高さも 120
+    const p = buildPlan({ ...base, width: 120, crop: { x: 0, y: 0, width: 300, height: 300 } })
+    expect([p.outWidth, p.outHeight]).toEqual([120, 120])
+    // 切り抜かなければ 16:9 のまま
+    expect(buildPlan({ ...base, width: 120 }).outHeight).toBe(68)
+  })
+
+  it('補正済みの矩形を plan に載せる (encode がそのまま元矩形に使う)', () => {
+    const p = buildPlan({ ...base, crop: { x: 600, y: 0, width: 999, height: 999 } })
+    expect(p.crop).toEqual({ x: 600, y: 0, width: 40, height: 360 })
+  })
+
+  it('切り抜きの警告が plan の warnings に出る', () => {
+    const p = buildPlan({ ...base, crop: { x: 0, y: 0, width: 0, height: 0 } })
+    expect(p.warnings).toContain('切り抜き範囲が空なので全体を使います')
+    expect([p.outWidth, p.outHeight]).toEqual([640, 360])
+  })
+
+  it('切り抜くと見積もりも小さくなる', () => {
+    const full = buildPlan(base)
+    const cropped = buildPlan({ ...base, crop: { x: 0, y: 0, width: 320, height: 180 } })
+    expect(cropped.estimatedBytes).toBeCloseTo(full.estimatedBytes / 4, -2)
   })
 })

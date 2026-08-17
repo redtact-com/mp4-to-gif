@@ -46,6 +46,56 @@ async function makeMovingVideo(page: Page, seconds = 2): Promise<string> {
   }, seconds)
 }
 
+/**
+ * 左半分が赤・右半分が青の動画。**どこを切り抜いたか色で分かる**ようにする。
+ * 動きも入れておく (静止画だとコマ抜きの確認にならない)。
+ */
+async function makeSplitVideo(page: Page, seconds = 1.5): Promise<string> {
+  return page.evaluate(async (sec) => {
+    const c = document.createElement('canvas')
+    c.width = 200; c.height = 100
+    const ctx = c.getContext('2d')!
+    const chunks: Blob[] = []
+    const rec = new MediaRecorder(c.captureStream(30), { mimeType: 'video/webm' })
+    rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data) }
+    rec.start()
+    const t0 = performance.now()
+    await new Promise<void>((resolve) => {
+      const draw = () => {
+        const el = performance.now() - t0
+        ctx.fillStyle = '#ff0000'; ctx.fillRect(0, 0, c.width / 2, c.height)
+        ctx.fillStyle = '#0000ff'; ctx.fillRect(c.width / 2, 0, c.width / 2, c.height)
+        // 上端で動く白い点。左右の色は塗り潰さない位置に置く
+        ctx.fillStyle = '#ffffff'
+        ctx.fillRect((el / (sec * 1000)) * c.width, 0, 6, 4)
+        if (el < sec * 1000) requestAnimationFrame(draw); else resolve()
+      }
+      requestAnimationFrame(draw)
+    })
+    rec.stop()
+    await new Promise<void>(r => { rec.onstop = () => r() })
+    return await new Promise<string>((res) => {
+      const fr = new FileReader()
+      fr.onload = () => res(fr.result as string)
+      fr.readAsDataURL(new Blob(chunks, { type: 'video/webm' }))
+    })
+  }, seconds)
+}
+
+/** 変換結果 GIF の 1 コマ目の中央画素 (RGB) */
+async function centerPixel(page: Page): Promise<[number, number, number]> {
+  return page.evaluate(async () => {
+    const img = document.querySelector('[data-testid="result"]') as HTMLImageElement
+    if (!img.complete) await new Promise<void>(r => { img.onload = () => r() })
+    const c = document.createElement('canvas')
+    c.width = img.naturalWidth; c.height = img.naturalHeight
+    const ctx = c.getContext('2d')!
+    ctx.drawImage(img, 0, 0)
+    const d = ctx.getImageData(Math.floor(c.width / 2), Math.floor(c.height / 2), 1, 1).data
+    return [d[0], d[1], d[2]] as [number, number, number]
+  })
+}
+
 /** dataURL を file input に流し込む */
 async function attach(page: Page, dataUrl: string, name: string): Promise<void> {
   const base64 = dataUrl.split(',')[1]
@@ -161,4 +211,74 @@ test('1 回変換すると見積もりが実測から校正される', async ({ 
   // 別の動画を読み直したら校正値は捨てる (素材が変われば比も変わる)
   await attach(page, await makeMovingVideo(page, 1), 'other.webm')
   await expect(page.getByTestId('estimate')).toContainText('初回は粗い目安')
+})
+
+test('切り抜いた範囲だけが GIF になる (左半分 → 赤・右半分 → 青)', async ({ page }) => {
+  await page.goto('/')
+  await attach(page, await makeSplitVideo(page), 'split.webm')
+  await expect(page.getByTestId('frames')).toBeVisible({ timeout: 20_000 })
+  await page.locator('input[type=radio]').nth(1).check()
+  await page.getByTestId('count').fill('3')
+
+  // 左半分 (0,0)-(100,100) → 中央は赤
+  await page.getByTestId('cropx').fill('0')
+  await page.getByTestId('cropy').fill('0')
+  await page.getByTestId('cropw').fill('100')
+  await page.getByTestId('croph').fill('100')
+  await expect(page.getByTestId('outsize')).toHaveText('100×100')
+  await page.getByTestId('convert').click()
+  await expect(page.getByTestId('actual')).toBeVisible({ timeout: 90_000 })
+  const left = await centerPixel(page)
+  expect(left[0], `左半分が赤くない: ${left}`).toBeGreaterThan(180)
+  expect(left[2], `左半分に青が混じっている: ${left}`).toBeLessThan(80)
+
+  // 右半分 (100,0)-(200,100) → 中央は青
+  await page.getByTestId('cropx').fill('100')
+  await page.getByTestId('convert').click()
+  await expect(page.getByTestId('actual')).toBeVisible({ timeout: 90_000 })
+  await expect(page.getByTestId('cropinfo')).toContainText('100×100 @ 100,0')
+  const right = await centerPixel(page)
+  expect(right[2], `右半分が青くない: ${right}`).toBeGreaterThan(180)
+  expect(right[0], `右半分に赤が混じっている: ${right}`).toBeLessThan(80)
+})
+
+test('切り抜きの縦横比が出力サイズの基準になる', async ({ page }) => {
+  await page.goto('/')
+  await attach(page, await makeSplitVideo(page), 'split.webm')
+  await expect(page.getByTestId('frames')).toBeVisible({ timeout: 20_000 })
+
+  // 200×100 (2:1) から 100×100 (1:1) を切り抜き、幅 60 → 高さも 60
+  await page.getByTestId('cropw').fill('100')
+  await page.getByTestId('croph').fill('100')
+  await page.getByTestId('width').fill('60')
+  await expect(page.getByTestId('outsize')).toHaveText('60×60')
+
+  // 全体に戻すと 2:1 に戻る
+  await page.getByTestId('cropfull').click()
+  await expect(page.getByTestId('outsize')).toHaveText('60×30')
+})
+
+test('プレビュー上のドラッグで範囲を取れる', async ({ page }) => {
+  await page.goto('/')
+  await attach(page, await makeSplitVideo(page), 'split.webm')
+  await expect(page.getByTestId('frames')).toBeVisible({ timeout: 20_000 })
+
+  await page.getByTestId('cropmode').check()
+  const box = await page.getByTestId('cropper').boundingBox()
+  if (!box) throw new Error('cropper が見つからない')
+
+  // 表示上の右下 1/4 をドラッグ → 元動画 200×100 の (100,50)-(200,100) に対応する
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width - 1, box.y + box.height - 1, { steps: 6 })
+  await page.mouse.up()
+
+  // 端の 1px 分は誤差として許容する
+  expect(Number(await page.getByTestId('cropx').inputValue())).toBeGreaterThanOrEqual(95)
+  expect(Number(await page.getByTestId('cropy').inputValue())).toBeGreaterThanOrEqual(45)
+  expect(Number(await page.getByTestId('cropw').inputValue())).toBeGreaterThan(90)
+  expect(Number(await page.getByTestId('croph').inputValue())).toBeGreaterThan(40)
+
+  // 選択枠が見えている
+  await expect(page.locator('.crop-box')).toBeVisible()
 })

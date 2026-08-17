@@ -56,7 +56,7 @@ export async function encodeGif(
   opts: EncodeOptions,
   onProgress?: (p: EncodeProgress) => void | Promise<void>,
 ): Promise<Uint8Array> {
-  const { outWidth: w, outHeight: h, times, delayMs } = plan
+  const { outWidth: w, outHeight: h, times, delayMs, crop } = plan
   if (w <= 0 || h <= 0 || times.length === 0) throw new Error('出力サイズかコマ数が 0 です')
 
   const canvas = document.createElement('canvas')
@@ -72,7 +72,8 @@ export async function encodeGif(
 
   for (let i = 0; i < times.length; i++) {
     await seekTo(video, times[i])
-    ctx.drawImage(video, 0, 0, w, h)
+    // 元矩形にクロップを渡す。plan 側ではみ出しは補正済み
+    ctx.drawImage(video, crop.x, crop.y, crop.width, crop.height, 0, 0, w, h)
     const { data } = ctx.getImageData(0, 0, w, h)
     await onProgress?.({ done: i, total: times.length, phase: 'seek' })
 

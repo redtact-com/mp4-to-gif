@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 import { buildPlan, calibrate, formatBytes, widthForBudget } from './core/plan'
-import type { FrameMode } from './core/plan'
+import type { CropRect, FrameMode } from './core/plan'
 import { encodeGif } from './core/encode'
 import './App.css'
 
@@ -22,6 +22,15 @@ export default function App() {
   const [width, setWidth] = useState(0)
   const [keepAspect, setKeepAspect] = useState(true)
   const [height, setHeight] = useState(0)
+  /** 切り抜き範囲 (元動画の画素座標)。null は全体 */
+  const [crop, setCrop] = useState<CropRect | null>(null)
+  /**
+   * ドラッグで範囲を取るモード。
+   * 既定は off — オーバーレイを常時被せると video の controls が押せなくなる。
+   */
+  const [cropDrag, setCropDrag] = useState(false)
+  /** ドラッグ中の始点 (元動画の画素座標) */
+  const dragFrom = useRef<{ x: number; y: number } | null>(null)
   const [colors, setColors] = useState(256)
   const [dither, setDither] = useState(false)
   const [holdLastMs, setHoldLastMs] = useState(0)
@@ -43,10 +52,11 @@ export default function App() {
     videoHeight: meta?.height ?? 0,
     start, end: end || (meta?.duration ?? 0),
     mode, fps, count, width, keepAspect, height, bytesPerPx,
-  }), [meta, start, end, mode, fps, count, width, keepAspect, height, bytesPerPx])
+    crop: crop ?? undefined,
+  }), [meta, start, end, mode, fps, count, width, keepAspect, height, bytesPerPx, crop])
 
   const onFile = useCallback((file: File) => {
-    setError(null); setResult(null); setBytesPerPx(undefined)
+    setError(null); setResult(null); setBytesPerPx(undefined); setCrop(null); setCropDrag(false)
     const url = URL.createObjectURL(file)
     const v = document.createElement('video')
     v.preload = 'metadata'
@@ -89,9 +99,49 @@ export default function App() {
 
   const fitToBudget = useCallback(() => {
     if (!meta) return
-    const w = widthForBudget(DISCORD_BUDGET, meta.width, meta.height, plan.times.length, bytesPerPx)
+    // 寸法は切り抜き後で見る (元幅より大きくしないため)
+    const w = widthForBudget(DISCORD_BUDGET, plan.crop.width, plan.crop.height, plan.times.length, bytesPerPx)
     if (w > 0) { setWidth(w); setKeepAspect(true) }
-  }, [meta, plan.times.length, bytesPerPx])
+  }, [meta, plan.crop, plan.times.length, bytesPerPx])
+
+  /** 表示座標 → 元動画の画素座標 */
+  const toSource = useCallback((e: React.PointerEvent<HTMLDivElement>): { x: number; y: number } => {
+    const r = e.currentTarget.getBoundingClientRect()
+    const sx = meta ? meta.width / r.width : 1
+    const sy = meta ? meta.height / r.height : 1
+    return { x: (e.clientX - r.left) * sx, y: (e.clientY - r.top) * sy }
+  }, [meta])
+
+  const onCropDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!cropDrag) return
+    e.currentTarget.setPointerCapture(e.pointerId)
+    dragFrom.current = toSource(e)
+    setCrop(null)
+  }, [cropDrag, toSource])
+
+  const onCropMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const from = dragFrom.current
+    if (!cropDrag || !from) return
+    const to = toSource(e)
+    // どちら向きにドラッグしても矩形になるよう min/max で取る
+    setCrop({
+      x: Math.min(from.x, to.x), y: Math.min(from.y, to.y),
+      width: Math.abs(to.x - from.x), height: Math.abs(to.y - from.y),
+    })
+  }, [cropDrag, toSource])
+
+  const onCropUp = useCallback(() => {
+    const had = dragFrom.current
+    dragFrom.current = null
+    // 掴んだだけ (幅か高さが 1px 未満) なら選択を捨てて全体に戻す
+    if (had) setCrop(c => (c && c.width >= 1 && c.height >= 1 ? c : null))
+  }, [])
+
+  /** 数値入力からの更新。未選択なら全体を初期値にする */
+  const editCrop = useCallback((patch: Partial<CropRect>) => {
+    if (!meta) return
+    setCrop(c => ({ ...(c ?? { x: 0, y: 0, width: meta.width, height: meta.height }), ...patch }))
+  }, [meta])
 
   const overBudget = plan.estimatedBytes > DISCORD_BUDGET
 
@@ -117,7 +167,30 @@ export default function App() {
       {meta && (
         <>
           <section className="panel">
-            <video ref={videoRef} src={src ?? undefined} controls muted playsInline preload="auto" />
+            <div className="stage">
+              <video ref={videoRef} src={src ?? undefined} controls muted playsInline preload="auto" />
+              {/* 範囲選択中だけポインタを奪う。常時被せると controls が押せない */}
+              <div
+                className={cropDrag ? 'cropper on' : 'cropper'}
+                data-testid="cropper"
+                onPointerDown={onCropDown}
+                onPointerMove={onCropMove}
+                onPointerUp={onCropUp}
+                onPointerCancel={onCropUp}
+              >
+                {crop && crop.width >= 1 && crop.height >= 1 && (
+                  <div
+                    className="crop-box"
+                    style={{
+                      left: `${(crop.x / meta.width) * 100}%`,
+                      top: `${(crop.y / meta.height) * 100}%`,
+                      width: `${(crop.width / meta.width) * 100}%`,
+                      height: `${(crop.height / meta.height) * 100}%`,
+                    }}
+                  />
+                )}
+              </div>
+            </div>
             <dl className="meta">
               <dt>ファイル</dt><dd>{meta.name} ({formatBytes(meta.size)})</dd>
               <dt>元サイズ</dt><dd>{meta.width} × {meta.height}</dd>
@@ -157,8 +230,56 @@ export default function App() {
             </fieldset>
 
             <fieldset>
+              <legend>切り抜き (トリミング)</legend>
+              <label className="row">
+                <input type="checkbox" checked={cropDrag} data-testid="cropmode"
+                       onChange={e => setCropDrag(e.target.checked)} />
+                プレビュー上をドラッグして選ぶ
+              </label>
+              <p className="hint">
+                入れている間は動画の再生操作ができません。位置を合わせたら外してください。
+              </p>
+              <div className="grid2">
+                <label>X
+                  <input type="number" min={0} max={meta.width} value={Math.round(plan.crop.x)}
+                         data-testid="cropx" onChange={e => editCrop({ x: Number(e.target.value) })} />
+                </label>
+                <label>Y
+                  <input type="number" min={0} max={meta.height} value={Math.round(plan.crop.y)}
+                         data-testid="cropy" onChange={e => editCrop({ y: Number(e.target.value) })} />
+                </label>
+                <label>幅
+                  <input type="number" min={1} max={meta.width} value={Math.round(plan.crop.width)}
+                         data-testid="cropw" onChange={e => editCrop({ width: Number(e.target.value) })} />
+                </label>
+                <label>高さ
+                  <input type="number" min={1} max={meta.height} value={Math.round(plan.crop.height)}
+                         data-testid="croph" onChange={e => editCrop({ height: Number(e.target.value) })} />
+                </label>
+              </div>
+              <div className="row wrap-btn">
+                <button type="button" className="chip" data-testid="cropfull"
+                        onClick={() => setCrop(null)}>全体</button>
+                <button type="button" className="chip"
+                        onClick={() => setCrop({ x: meta.width / 4, y: meta.height / 4,
+                                                 width: meta.width / 2, height: meta.height / 2 })}>
+                  中央 1/2
+                </button>
+                <button type="button" className="chip"
+                        onClick={() => setCrop({ x: 0, y: 0, width: meta.width / 2, height: meta.height })}>
+                  左半分
+                </button>
+                <button type="button" className="chip"
+                        onClick={() => setCrop({ x: meta.width / 2, y: 0,
+                                                 width: meta.width / 2, height: meta.height })}>
+                  右半分
+                </button>
+              </div>
+            </fieldset>
+
+            <fieldset>
               <legend>出力サイズ</legend>
-              <label>幅 (px・0 で元サイズ)
+              <label>幅 (px・0 で切り抜き後のサイズ)
                 <input type="number" min={0} value={width}
                        data-testid="width" onChange={e => setWidth(Number(e.target.value))} />
               </label>
@@ -201,6 +322,12 @@ export default function App() {
               <strong data-testid="frames">{plan.times.length}</strong> コマ ・
               <strong data-testid="outsize">{plan.outWidth}×{plan.outHeight}</strong> ・
               実効 {plan.effectiveFps.toFixed(1)} fps ・1 コマ {plan.delayMs}ms
+              {crop && (
+                <span className="hint" data-testid="cropinfo">
+                  {' '}(切り抜き {Math.round(plan.crop.width)}×{Math.round(plan.crop.height)}
+                  {' '}@ {Math.round(plan.crop.x)},{Math.round(plan.crop.y)})
+                </span>
+              )}
             </div>
             <div className={overBudget ? 'budget over' : 'budget'} data-testid="estimate">
               見積もり {formatBytes(plan.estimatedBytes)}
