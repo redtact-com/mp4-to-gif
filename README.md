@@ -7,10 +7,17 @@ Discord などに貼る短い動作 GIF を、狙った容量に収めて作る�
 
 ## 使う
 
+公開版: **https://redtact-com.github.io/mp4-to-gif/** (main に入ると自動で更新される)
+
+手元で動かす場合:
+
 ```bash
 npm install
 npm run dev      # http://localhost:5173
 ```
+
+どちらでも変換はブラウザ内で行われ、**動画はどこにも送信されない**。
+公開版で足りるので、普段は localhost を立てる必要はない。
 
 動画をドロップ → 切り出し範囲・コマ数・幅を決める → **変換** → 保存。
 
@@ -45,6 +52,7 @@ GIF は LZW + コマ間差分なので、容量は**中身次第で大きく振�
 npm run typecheck   # tsc -b
 npm test            # vitest (src/**/*.test.ts)
 npm run e2e         # playwright (本番ビルドに対して実行)
+npm run e2e:pages   # GitHub Pages と同じサブパス配信で読めるかの確認
 npm run build
 ```
 
@@ -60,3 +68,13 @@ npm run build
 「6 コマ抜いたら 6 種類の中身になる」を assert できる (GIF をコマ単位に切ってバイト比較している)。
 
 外部ファイルに依存しないので CI でもそのまま回る。
+
+### GitHub Pages
+
+サーバ処理が無く、ffmpeg.wasm を避けたので COOP/COEP ヘッダも要らない。つまり静的配信だけで動く。
+project site は `/mp4-to-gif/` 配下に置かれるので `vite.config.ts` の `base` を `GITHUB_PAGES=1` で切り替える
+(dev / 通常の E2E は `/` のまま)。
+
+`base` の設定ミスは**真っ白なページになるだけで例外もエラーも出ない**ので、`npm run e2e:pages` で確認している。
+`vite preview` は base 外も index.html で拾ってしまい確認にならないため、
+`scripts/serve-subpath.mjs` (Pages と同じく配下の外は 404) で配信して読み込ませている。

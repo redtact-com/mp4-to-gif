@@ -7,6 +7,8 @@ const PORT = Number(process.env.E2E_PORT ?? 5178)
 
 export default defineConfig({
   testDir: './e2e',
+  // Pages 配信の確認は playwright.pages.config.ts が担当する
+  testIgnore: 'pages-smoke.spec.ts',
   fullyParallel: false,
   workers: 1,
   timeout: 120_000,
